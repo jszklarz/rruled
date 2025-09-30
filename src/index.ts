@@ -5,15 +5,52 @@
 // - Returns { rrules: string[] } or { unsupported: string } when text exceeds RRULE capability.
 
 import type { RRuleResult } from "./types.js";
-import { normalizeInput, parseDuration, parseTime } from "./parsers.js";
-import { matchPatterns } from "./matchers.js";
+import { normalizeInput, parseDuration, parseTime, durationToCount, parseStartDate } from "./parsers.js";
+import { matchPatterns, type MatchResult } from "./matchers.js";
 import { buildRRule, normalizeMatches } from "./rrule-builder.js";
+
+/**
+ * Detect conflicting or nonsensical pattern combinations
+ */
+function detectConflicts(matches: MatchResult): string | null {
+  // Conflict: HOURLY/MINUTELY frequency with nth weekday patterns
+  if ((matches.frequency === "HOURLY" || matches.frequency === "MINUTELY") && matches.nthWeekdays.length > 0) {
+    return "Conflicting patterns: hourly/minutely frequency cannot be combined with nth weekday patterns (e.g., 'first monday'). Please use a daily, weekly, or monthly frequency.";
+  }
+
+  // Conflict: DAILY frequency with nth weekday patterns
+  if (matches.frequency === "DAILY" && matches.nthWeekdays.length > 0) {
+    return "Conflicting patterns: daily frequency cannot be combined with nth weekday patterns (e.g., 'first monday'). Please use weekly or monthly frequency.";
+  }
+
+  // Conflict: YEARLY frequency with monthDays but no months specified
+  if (matches.frequency === "YEARLY" && matches.monthDays.length > 0 && matches.months.length === 0) {
+    return "Ambiguous pattern: yearly frequency with specific days (e.g., '15th') requires specifying which month(s). Please add a month like 'in january'.";
+  }
+
+  // Conflict: Multiple conflicting interval specifications
+  if (matches.interval && matches.interval > 1) {
+    // Allow MINUTELY with hour ranges (that's valid: every 15 minutes between 9am-5pm)
+    if (matches.frequency === "MINUTELY" && matches.times.length > 0 && !matches.hourRange) {
+      return "Conflicting patterns: cannot combine interval-based minutely recurrence (e.g., 'every 15 minutes') with specific times (e.g., 'at 9am'). Choose one approach.";
+    }
+    if (matches.frequency === "HOURLY" && matches.times.length > 0 && matches.times[0].minute !== 0) {
+      return "Conflicting patterns: interval-based hourly recurrence (e.g., 'every 2 hours') with non-zero minutes is ambiguous. Use 'at :00' for on-the-hour times.";
+    }
+  }
+
+  // Conflict: Hour range with non-hourly/minutely frequency
+  if (matches.hourRange && matches.frequency !== "HOURLY" && matches.frequency !== "MINUTELY") {
+    return "Conflicting patterns: hour ranges (e.g., 'between 9am and 5pm') require hourly or minutely frequency. Current frequency is " + matches.frequency + ".";
+  }
+
+  return null;
+}
 
 /**
  * Convert a natural language schedule description to RRULE expression(s).
  *
  * @param input - Natural language schedule description (e.g., "every monday at 9am")
- * @param locale - Optional locale code (e.g., "en", "es"). Defaults to "en"
  * @returns Object with either `rrules` array or `unsupported` message
  *
  * @example
@@ -28,21 +65,13 @@ import { buildRRule, normalizeMatches } from "./rrule-builder.js";
  * // => { rrules: ["FREQ=MONTHLY;BYDAY=1MO"] }
  * ```
  */
-export function rruled(input: string, locale: string = "en"): RRuleResult {
+export function rruled(input: string): RRuleResult {
   const normalizedText = normalizeInput(input);
 
   // Handle empty or whitespace-only input
   if (!normalizedText) {
     return {
       unsupported: "Could not understand the input. Please provide a schedule description.",
-    };
-  }
-
-  // Check for duration phrases that are ambiguous with COUNT
-  const duration = parseDuration(normalizedText);
-  if (duration) {
-    return {
-      unsupported: `Duration phrases like "for ${duration.value} ${duration.unit}s" are ambiguous with occurrence counts. Please use "for N occurrences" to specify a count, or consider using UNTIL with an end date instead.`,
     };
   }
 
@@ -75,6 +104,25 @@ export function rruled(input: string, locale: string = "en"): RRuleResult {
     };
   }
 
+  // Validate for conflicting/nonsensical combinations
+  const conflictError = detectConflicts(matches);
+  if (conflictError) {
+    return { unsupported: conflictError };
+  }
+
+  // Convert duration phrases to COUNT if present
+  const duration = parseDuration(normalizedText);
+  if (duration && !matches.count) {
+    const weekdayCount = matches.weekdays.length > 0 ? matches.weekdays.length : 1;
+    const calculatedCount = durationToCount(duration, matches.frequency, matches.interval || 1, weekdayCount);
+    if (calculatedCount !== null && calculatedCount > 0) {
+      matches.count = calculatedCount;
+    }
+  }
+
+  // Parse start date if present
+  const dtstart = parseStartDate(normalizedText);
+
   // Check if we have multiple distinct hour/minute pairs (cartesian product issue)
   if (matches.times.length > 1 && !matches.hourRange) {
     const uniqueMinutes = new Set(matches.times.map((t) => t.minute));
@@ -87,30 +135,28 @@ export function rruled(input: string, locale: string = "en"): RRuleResult {
         const rrules: string[] = [];
         const numTimes = matches.times.length;
 
-        // Determine how many RRULEs to create and how to distribute COUNT
-        let rulesToCreate: number;
+        // If COUNT is specified and less than number of times, this is ambiguous
+        if (matches.count !== null && matches.count < numTimes) {
+          return {
+            unsupported: `Ambiguous: specified ${matches.count} occurrence(s) but ${numTimes} different times. Unable to determine which times should fire. Please specify "for ${numTimes} occurrences" or more, or reduce the number of times.`,
+          };
+        }
+
+        // Determine how to distribute COUNT across all times
         let countPerRule: number | null;
+        let remainderCount = 0;
 
         if (matches.count !== null) {
-          // If COUNT < numTimes, only create COUNT rules (each with COUNT=1)
-          // Otherwise distribute COUNT across all times
-          if (matches.count < numTimes) {
-            rulesToCreate = matches.count;
-            countPerRule = 1;
-          } else {
-            rulesToCreate = numTimes;
-            countPerRule = Math.floor(matches.count / numTimes);
-          }
+          // Distribute COUNT evenly across all times
+          countPerRule = Math.floor(matches.count / numTimes);
+          remainderCount = matches.count % numTimes;
         } else {
-          // No COUNT, create a rule for each time
-          rulesToCreate = numTimes;
+          // No COUNT, create a rule for each time without COUNT
           countPerRule = null;
         }
 
-        const remainderCount = matches.count && matches.count >= numTimes ? matches.count % numTimes : 0;
-
-        // Create RRULEs (limited by COUNT if necessary)
-        for (let i = 0; i < rulesToCreate; i++) {
+        // Create RRULEs for all times
+        for (let i = 0; i < numTimes; i++) {
           const time = matches.times[i];
           const matchesForTime = {
             ...matches,
@@ -123,7 +169,11 @@ export function rruled(input: string, locale: string = "en"): RRuleResult {
           rrules.push(rrule);
         }
 
-        return { rrules };
+        const result: RRuleResult = { rrules };
+        if (dtstart) {
+          result.dtstart = dtstart;
+        }
+        return result;
       } catch (error) {
         return {
           unsupported: `Could not construct a valid RRULE: ${error instanceof Error ? error.message : String(error)}`,
@@ -137,7 +187,11 @@ export function rruled(input: string, locale: string = "en"): RRuleResult {
     const normalized = normalizeMatches(matches);
     const rrule = buildRRule(normalized);
 
-    return { rrules: [rrule] };
+    const result: RRuleResult = { rrules: [rrule] };
+    if (dtstart) {
+      result.dtstart = dtstart;
+    }
+    return result;
   } catch (error) {
     return {
       unsupported: `Could not construct a valid RRULE: ${error instanceof Error ? error.message : String(error)}`,

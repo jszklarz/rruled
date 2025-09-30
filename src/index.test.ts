@@ -360,37 +360,28 @@ describe("rruled - Time Windows and Multiple Times", () => {
     }
   });
 
-  it("should handle COUNT less than number of times (only emit COUNT rules)", () => {
-    // "for 1 occurrence" with 2 times should only emit 1 RRULE, not 2
+  it("should reject COUNT less than number of times as ambiguous", () => {
+    // "for 1 occurrence" with 2 times is ambiguous - which time should fire?
     const result = rruled("daily at 9:15am and 5:45pm for 1 occurrence");
 
-    if ("rrules" in result) {
-      // Should only create 1 RRULE since COUNT=1
-      expect(result.rrules.length).toBe(1);
-      expect(result.rrules[0]).toContain("COUNT=1");
-      expect(result.rrules[0]).toContain("BYHOUR=9");
-      expect(result.rrules[0]).toContain("BYMINUTE=15");
+    if ("unsupported" in result) {
+      expect(result.unsupported).toContain("Ambiguous");
+      expect(result.unsupported).toContain("1 occurrence");
+      expect(result.unsupported).toContain("2 different times");
     } else {
-      throw new Error("Expected rrules, got unsupported");
+      throw new Error("Expected unsupported, got rrules");
     }
   });
 
-  it("should handle COUNT=2 with 3 times (only emit 2 rules)", () => {
+  it("should reject COUNT=2 with 3 times as ambiguous", () => {
     const result = rruled("daily at 9:15am, 12:30pm, and 5:45pm for 2 occurrences");
 
-    if ("rrules" in result) {
-      // Should only create 2 RRULEs since COUNT=2
-      expect(result.rrules.length).toBe(2);
-
-      // Both should have COUNT=1
-      expect(result.rrules[0]).toContain("COUNT=1");
-      expect(result.rrules[1]).toContain("COUNT=1");
-
-      // Should be first 2 times
-      expect(result.rrules[0]).toContain("BYHOUR=9");
-      expect(result.rrules[1]).toContain("BYHOUR=12");
+    if ("unsupported" in result) {
+      expect(result.unsupported).toContain("Ambiguous");
+      expect(result.unsupported).toContain("2 occurrence");
+      expect(result.unsupported).toContain("3 different times");
     } else {
-      throw new Error("Expected rrules, got unsupported");
+      throw new Error("Expected unsupported, got rrules");
     }
   });
 });
@@ -450,20 +441,18 @@ describe("rruled - Start Dates and Counts", () => {
     expect(result).toEqual({ rrules: ["FREQ=DAILY;COUNT=10"] });
   });
 
-  it("should mark 'every monday for 5 weeks' as unsupported (duration ambiguity)", () => {
+  it("should convert 'every monday for 5 weeks' to COUNT=5", () => {
     const result = rruled("every monday for 5 weeks");
-    expect(result).toHaveProperty("unsupported");
-    if ("unsupported" in result) {
-      expect(result.unsupported).toContain("ambiguous");
+    if ("rrules" in result) {
+      expect(result.rrules[0]).toContain("FREQ=WEEKLY");
+      expect(result.rrules[0]).toContain("COUNT=5");
+      expect(result.rrules[0]).toContain("BYDAY=MO");
     }
   });
 
-  it("should mark 'daily for 30 days' as unsupported (duration ambiguity)", () => {
+  it("should convert 'daily for 30 days' to COUNT=30", () => {
     const result = rruled("daily for 30 days");
-    expect(result).toHaveProperty("unsupported");
-    if ("unsupported" in result) {
-      expect(result.unsupported).toContain("ambiguous");
-    }
+    expect(result).toEqual({ rrules: ["FREQ=DAILY;COUNT=30"] });
   });
 });
 

@@ -1,4 +1,4 @@
-export type RRuleResult = { rrules: string[]; note?: string } | { unsupported: string };
+export type RRuleResult = { rrules: string[]; dtstart?: string; note?: string } | { unsupported: string };
 
 export interface ParsedTime {
   hour24: number;

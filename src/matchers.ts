@@ -108,16 +108,20 @@ export function matchPatterns(text: string): MatchResult {
   }
 
   // 2. If months + nth weekdays, use YEARLY
+  //    "first monday of january" = FREQ=YEARLY;BYMONTH=1;BYDAY=1MO
   if (result.months.length > 0 && result.nthWeekdays.length > 0) {
     result.frequency = "YEARLY";
   }
 
   // 3. If months + weekdays (not nth), use YEARLY
+  //    "every monday in march" = FREQ=YEARLY;BYMONTH=3;BYDAY=MO
+  //    This fires on ALL Mondays in March, every year (~4-5 occurrences per year)
   if (result.months.length > 0 && result.weekdays.length > 0 && result.nthWeekdays.length === 0) {
     result.frequency = "YEARLY";
   }
 
   // 4. If months are specified without other frequency, default to YEARLY
+  //    "every march" = yearly in march
   if (result.months.length > 0 && !result.frequency) {
     result.frequency = "YEARLY";
   }
